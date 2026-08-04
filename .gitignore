@@ -1,0 +1,15 @@
+# Securité
+.env
+
+# Environnement virtuel
+.venv/
+
+# Fichier pyhton temproraire
+__pycahe__/
+
+# IDE
+.vscode/
+.idea/
+
+# Base de données
+.db
