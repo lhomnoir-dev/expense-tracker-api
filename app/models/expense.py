@@ -10,7 +10,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .. import Base
+from ..database import Base
 
 
 class Category(Base):
@@ -21,10 +21,14 @@ class Category(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     is_default = Column(Boolean, default=False)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     owner = relationship("User", back_populates="custom_categories")
-    expenses = relationship("Expense", back_populates="category")
+    expenses = relationship(
+        "Expense",
+        back_populates="category",
+        cascade="all, delete-orphan",
+    )
 
 
 class Expense(Base):
@@ -34,7 +38,7 @@ class Expense(Base):
     amount = Column(Float, nullable=False)
     created_date = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    category_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
     category = relationship("Category", back_populates="expenses")
 
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)

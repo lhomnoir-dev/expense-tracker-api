@@ -5,11 +5,11 @@
 .venv/
 
 # Fichier pyhton temproraire
-__pycahe__/
+*__pycache__/
+
 
 # IDE
 .vscode/
 .idea/
 
 # Base de données
-.db

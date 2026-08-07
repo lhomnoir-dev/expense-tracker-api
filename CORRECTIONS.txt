@@ -1,0 +1,258 @@
+==============================================
+EXPLICATION DES CORRECTIONS
+Expense Tracker API
+==============================================
+
+Cette fiche récapitule toutes les erreurs détectées et corrigées
+dans le code de l'application, avec le fichier concerné, le problème
+rencontré et la correction apportée.
+
+
+--------------------------------------------------------------
+1. app/utils/seed.py — Erreur de syntaxe sur filter_by
+--------------------------------------------------------------
+
+PROBLÈME :
+    La fonction seed_categories utilisait :
+        db.query(Category).filter_by(name == name, is_default=True)
+
+    filter_by() attend des arguments nommés (name="..."), pas une
+    expression booléenne (name == name). Au runtime, cela levait :
+        TypeError: Query.filter_by() takes 1 positional argument
+        but 2 were given
+
+    La fonction se plantait donc à chaque appel.
+
+CORRECTION :
+    Remplacé par un filtre correct :
+        db.query(Category)
+          .filter(Category.name == name, Category.is_default.is_(True))
+          .first()
+
+    La fonction est maintenant idempotente : chaque catégorie par
+    défaut n'est insérée qu'une seule fois.
+
+
+--------------------------------------------------------------
+2. app/models/expense.py — owner_id NOT NULL incompatible avec le seed
+--------------------------------------------------------------
+
+PROBLÈME :
+    Le modèle Category déclarait :
+        owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    alors que le seed crée les catégories par défaut avec
+    owner_id=None (catégories partagées, sans propriétaire).
+    La base de données rejetait l'insertion avec :
+        psycopg2.errors.NotNullViolation
+
+CORRECTION :
+    owner_id est devenu nullable :
+        owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    Les catégories par défaut peuvent ainsi exister sans propriétaire,
+    tout en restant rattachées à un utilisateur pour les catégories
+    personnalisées.
+
+
+--------------------------------------------------------------
+3. app/services/expense_service.py — create_expense incomplet
+--------------------------------------------------------------
+
+PROBLÈME :
+    La fonction create_expense ne remplissait QUE description et
+    amount :
+        db_expense = Expense(description=..., amount=...)
+
+    Or les colonnes category_id et owner_id sont NOT NULL en base.
+    La création d'une dépense échouait systématiquement avec un
+    code 500 :
+        sqlalchemy.exc.IntegrityError: null value in column
+        "category_id" of relation "expenses" violates not-null
+        constraint
+
+CORRECTION :
+    La fonction résout maintenant une catégorie et fixe le
+    propriétaire :
+        - si expense.custom_category est fourni, la catégorie
+          (personnalisée) est créée/récupérée pour l'utilisateur
+          via get_or_create_category ;
+        - sinon, si expense.category_id est fourni, elle est utilisée ;
+        - sinon, une catégorie par défaut (seedée) est assignée ;
+        - owner_id est toujours renseigné à partir du payload.
+
+    Si aucune catégorie par défaut n'existe, une erreur claire
+    ValueError est levée au lieu d'un crash silencieux.
+
+
+--------------------------------------------------------------
+4. app/services/expense_service.py — get_or_create_category illogique
+--------------------------------------------------------------
+
+PROBLÈME :
+    L'ancienne version appelait seed_categories(db) puis testait
+    sa valeur de retour (toujours None), et ignorait le paramètre
+    name. Résultat : une nouvelle catégorie était créée à chaque
+    appel, même si une catégorie identique existait déjà.
+
+CORRECTION :
+    La fonction recherche d'abord une catégorie existante pour ce
+    propriétaire :
+        db.query(Category)
+          .filter(Category.name == name, Category.owner_id == user_id)
+          .first()
+
+    Si elle existe, elle est retournée. Sinon, elle est créée
+    (is_default=False, owner_id=user_id) puis committée.
+
+    Ajout d'une fonction get_default_category(db) qui retourne une
+    catégorie par défaut (is_default=True) pour l'affecter aux
+    dépenses sans catégorie explicite.
+
+
+--------------------------------------------------------------
+5. app/config.py — quote_plus sur une valeur absente
+--------------------------------------------------------------
+
+PROBLÈME :
+    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
+
+    Si la variable DB_PASSWORD n'était pas définie dans l'environnement
+    (.env manquant ou clé absente), os.getenv renvoyait None et
+    quote_plus(None) levait une TypeError au démarrage.
+
+CORRECTION :
+    DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD") or "")
+
+    Une valeur vide par défaut est utilisée, évitant le crash.
+
+
+--------------------------------------------------------------
+6. app/routes/auth.py — gestion du register
+--------------------------------------------------------------
+
+PROBLÈME :
+    - Si create_user renvoyait None, la fonction retournait
+      implicitement None (réponse 200 vide au lieu de 201).
+    - En cas d'erreur, l'exception SQL brute était renvoyée au
+      client dans le détail du 409 (fuite d'information).
+
+CORRECTION :
+    - La création est isolée dans le try : seule l'appel à
+      create_user est couverte par le bloc.
+    - Si db_user est None, un HTTP 400 explicite est levé.
+    - L'exception n'est plus divulguée : le détail du 409 est un
+      message clair "Un utilisateur avec cet identifiant existe déjà".
+
+
+--------------------------------------------------------------
+7. Imports : mélange absolu / relatif — ModuleNotFoundError
+--------------------------------------------------------------
+
+PROBLÈME :
+    Certains fichiers utilisaient des imports absolus sans préfixe
+    package :
+        from database import ...     (app/database.py)
+        from models import ...       (services, utils)
+        from config import ...       (modèles, database)
+
+    D'autres utilisaient des imports relatifs :
+        from .database import ...
+        from ..config import ...
+
+    Selon le point d'entrée (uvicorn main:app depuis le dossier app
+    OU alembic qui importe app.config), un des deux styles échouait :
+        ModuleNotFoundError: No module named 'config'
+
+    Alembic notamment ne pouvait plus lancer ses migrations.
+
+CORRECTION :
+    Tous les imports internes du package app ont été uniformisés en
+    imports relatifs de package :
+        - app/database.py          : from .config import DATABASE_URL
+        - app/models/__init__.py   : from ..database import Base
+        - app/models/user.py       : from ..database import Base
+        - app/models/expense.py    : from ..database import Base
+        - app/main.py              : from .routes import ...,
+                                     from .database import ...
+        - app/routes/auth.py       : from ..schemas.user import ...,
+                                     from ..database import ...,
+                                     from ..services.user_service import ...
+        - app/routes/expense.py    : imports ..database, ..schemas.expense,
+                                     ..services.expense_service
+        - app/services/user_service.py : imports ..models, ..schemas.user,
+                                         ..utils.hashing
+        - app/services/expense_service.py : imports ..models, ..schemas.expense,
+                                            ..utils.seed
+        - app/utils/seed.py        : from ..models import Category
+
+    L'application se lance désormais depuis la racine du projet :
+        uvicorn app.main:app
+    et Alembic fonctionne normalement (alembic upgrade head).
+
+
+--------------------------------------------------------------
+8. .gitignore — typo
+--------------------------------------------------------------
+
+PROBLÈME :
+    La ligne suivante ne matchetait pas les dossiers __pycache__ :
+        *__pycahe__/
+
+    Les fichiers compilés .pyc apparaissaient donc dans git status.
+
+CORRECTION :
+        *__pycache__/
+
+
+--------------------------------------------------------------
+9. Base de données — schéma désynchronisé (migration alembic)
+--------------------------------------------------------------
+
+PROBLÈME :
+    Le schéma en base ne correspondait pas aux modèles corrigés :
+    - expenses.category_id avait une clé étrangère vers users(id)
+      au lieu de categories(id) ;
+    - categories.owner_id était NOT NULL, incompatible avec les
+      catégories par défaut partagées (owner_id NULL).
+
+    La migration initiale (a50a47623918) était vide (pass), donc
+    les tables avaient été créées par create_all avec l'ancien modèle.
+
+CORRECTION :
+    Nouvelle migration Alembic créée :
+        alembic/versions/5b50a115ae4b_fix_categories_and_expenses_schema.py
+
+    upgrade() :
+        - categories.owner_id rendu nullable (NULL autorisé) ;
+        - la clé étrangère expenses_category_id_fkey est supprimée puis
+          recréée vers categories(id).
+
+    downgrade() : restauration exacte de l'état précédent.
+
+    Migration appliquée :
+        .venv/bin/alembic upgrade head
+
+    État vérifié :
+        expenses.category_id  -> FOREIGN KEY REFERENCES categories(id)
+        categories.owner_id   -> nullable
+
+
+--------------------------------------------------------------
+Vérifications effectuées après correction
+--------------------------------------------------------------
+
+    - Compilation Python OK sur tous les fichiers modifiés.
+    - Import du package OK : python -c "import app.main"
+    - Serveur lancé : uvicorn app.main:app --port 8000
+    - Tests d'API réussis :
+        GET  /                          -> 200
+        POST /auth/register             -> 201 (nouvel utilisateur)
+        POST /auth/register (doublon)   -> 409 (message clair)
+        GET  /expenses/                 -> 200
+        POST /expenses/ (sans catégorie) -> 201 (catégorie par défaut)
+        POST /expenses/ (custom_category) -> 201 (catégorie créée)
+        GET  /expenses/{id}             -> 200 / 404
+        PUT  /expenses/{id}             -> 200
+        DELETE /expenses/{id}           -> 204
+    - 6 catégories par défaut correctement seedées (owner_id NULL).
